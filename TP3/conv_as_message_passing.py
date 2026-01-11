@@ -25,11 +25,50 @@ def image_to_graph(
     # Assumptions (remove it for the bonus)
     assert image.dim() == 3, f"Expected 3D tensor, got {image.dim()}D tensor."
     if conv2d is not None:
-        assert conv2d.padding[0] == conv2d.padding[1] == 1, "Expected padding of 1 on both sides."
-        assert conv2d.kernel_size[0] == conv2d.kernel_size[1] == 3, "Expected kernel size of 3x3."
+        assert conv2d.padding[0] == conv2d.padding[1] == 1, (
+            "Expected padding of 1 on both sides."
+        )
+        assert conv2d.kernel_size[0] == conv2d.kernel_size[1] == 3, (
+            "Expected kernel size of 3x3."
+        )
         assert conv2d.stride[0] == conv2d.stride[1] == 1, "Expected stride of 1."
 
-    raise NotImplementedError
+    kernel_size = 3
+    padding = 1
+
+    C, H, W = image.shape
+
+    # Node features (each pixel is a node)
+    x = image.view(C, -1).T
+
+    # Edge index and edge attributes
+    edge_list = []
+    edge_attr_list = []
+
+    half_k = kernel_size // 2
+    kernel_points = [
+        (i - half_k, j - half_k) for i in range(kernel_size) for j in range(kernel_size)
+    ]
+
+    for i in range(H):
+        for j in range(W):
+            node_idx = i * W + j
+            for di, dj in kernel_points:
+                ni, nj = i + di, j + dj
+                if 0 <= ni < H and 0 <= nj < W:
+                    neighbor_idx = ni * W + nj
+                    edge_list.append((neighbor_idx, node_idx))
+                    # Store relative position as edge attribute but shifted to start from (0,0)
+                    edge_attr_list.append((dj + half_k, di + half_k))
+
+    edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+    edge_attr_list = torch.tensor(edge_attr_list, dtype=torch.float)
+
+    data = torch_geometric.data.Data(
+        x=x, edge_index=edge_index, edge_attr=edge_attr_list
+    )
+
+    return data
 
 
 def graph_to_image(
@@ -57,9 +96,23 @@ def graph_to_image(
     # Assumptions (remove it for the bonus)
     assert data.dim() == 2, f"Expected 2D tensor, got {data.dim()}D tensor."
     if conv2d is not None:
-        assert conv2d.padding[0] == conv2d.padding[1] == 1, "Expected padding of 1 on both sides."
-        assert conv2d.kernel_size[0] == conv2d.kernel_size[1] == 3, "Expected kernel size of 3x3."
+        assert conv2d.padding[0] == conv2d.padding[1] == 1, (
+            "Expected padding of 1 on both sides."
+        )
+        assert conv2d.kernel_size[0] == conv2d.kernel_size[1] == 3, (
+            "Expected kernel size of 3x3."
+        )
         assert conv2d.stride[0] == conv2d.stride[1] == 1, "Expected stride of 1."
+
+    # Checking if there is no mismatch in dimensions
+    N, C = data.shape
+    assert N == height * width, (
+        f"Data has {N} nodes, but expected {height * width} nodes."
+    )
+
+    image = data.T.view(C, height, width)
+
+    return image
 
 
 class Conv2dMessagePassing(torch_geometric.nn.MessagePassing):
@@ -68,11 +121,12 @@ class Conv2dMessagePassing(torch_geometric.nn.MessagePassing):
     """
 
     def __init__(self, conv2d: torch.nn.Conv2d):
-        # <TO IMPLEMENT>
-        # Don't forget to call the parent constructor with the correct aguments
-        # super().__init__(<arguments>)
-        # </TO IMPLEMENT>
-        raise NotImplementedError
+        # Initialize the MessagePassing class with sum aggregation to simulate convolution over neighbors
+        super().__init__(aggr="add")
+
+        # Store the Conv2d layer and its weights
+        self.conv2d = conv2d
+        self.weights = conv2d.weight
 
     def forward(self, data):
         self.edge_index = data.edge_index
@@ -103,4 +157,13 @@ class Conv2dMessagePassing(torch_geometric.nn.MessagePassing):
         torch.Tensor
             The message to be passed for each edge (of size COMPLETE)
         """
-        raise NotImplementedError
+
+        col_idx = edge_attr[:, 0].long()
+        row_idx = edge_attr[:, 1].long()
+
+        weights = self.weights[:, :, row_idx, col_idx]
+        weights = weights.permute(2, 1, 0)
+
+        message = torch.bmm(x_j.unsqueeze(1), weights).squeeze(1)
+
+        return message
